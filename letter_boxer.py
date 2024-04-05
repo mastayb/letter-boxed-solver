@@ -26,22 +26,56 @@ def build_trie_from_file(filename: Path):
     return trie
 
 
-@dataclass
 class SolutionCandidate:
     char_set: ClassVar[FrozenSet[str]] = frozenset()
     word_list: List[str]
+    residue_size_history: List[int]
     residue: FrozenSet[str]
 
-    def __init__(self, word_list: Optional[List[str]] = None) -> None:
+    def __init__(
+        self,
+        word_list: Optional[List[str]] = None,
+        residue_size_history: Optional[List[int]] = None,
+        residue: Optional[FrozenSet[str]] = None,
+    ) -> None:
         self.word_list = word_list if word_list is not None else []
-        self.residue = self.calculate_residue()
 
-    def calculate_residue(self) -> FrozenSet[str]:
-        remaining = set(self.char_set)
-        for c in chain(*self.word_list):
-            if c in remaining:
-                remaining.remove(c)
-        return frozenset(remaining)
+        if residue_size_history is not None and residue is not None:
+            self.residue_size_history = residue_size_history
+            self.residue = residue
+        else:
+            self.residue_size_history = []
+            residue = set(self.char_set)
+            for word in self.word_list:
+                residue = residue - {c for c in word}
+                self.residue_size_history.append(len(residue))
+            self.residue = frozenset(residue)
+
+    def add_word(self, word: str) -> "SolutionCandidate":
+        next_residue = self.residue - set(word)
+        return SolutionCandidate(
+            self.word_list + [word],
+            self.residue_size_history + [len(next_residue)],
+            next_residue,
+        )
+
+    def viable_next_word(self, word: str) -> bool:
+        next_residue = self.residue - set(word)
+
+        # check if the residue is decreasing
+        if len(next_residue) < len(self.residue):
+            return True
+
+        # otherwise see if we've been at an equivalent state (same residue size with same ending char)
+        for res_size, prior_word in zip(self.residue_size_history, self.word_list):
+            if res_size == len(next_residue) and prior_word[-1] == word[-1]:
+                return False
+
+        # It may be possible to make progress from here
+        return True
+
+    def gamestate_class(self) -> Tuple[Tuple[FrozenSet[str], str], int]:
+        return (self.residue, self.word_list[-1][-1]), len(self.word_list)
 
 
 @dataclass(order=True)
@@ -103,6 +137,34 @@ class LetterBoxer:
                 self.word_map[word[0]] = set()
             self.word_map[word[0]].add(word)
 
+    def check_solvable(self) -> bool:
+        """
+        Check if the puzzle is solvable.
+        """
+        if set(self.charset) - {c for word in self.possible_words for c in word}:
+            return False
+
+        # find connected components; if there is a connected component that contains all the characters, the puzzle is solvable
+        char_graph = {}
+        for char in self.charset:
+            char_graph[char] = set()
+            if char not in self.word_map:
+                continue
+            for word in self.word_map[char]:
+                char_graph[char] = char_graph[char].union(set(word))
+
+        for start in char_graph:
+            visited = set()
+            stack = [start]
+            while stack:
+                curr = stack.pop()
+                visited.add(curr)
+                stack.extend(char_graph[curr] - visited)
+            if visited == self.charset:
+                return True
+
+        return False
+
     def solve(self):
         """
         Solve the puzzle with branch and bound.
@@ -112,6 +174,12 @@ class LetterBoxer:
         pq = []
         candidates_considered = 0
 
+        seen_states = {}
+
+        if not self.check_solvable():
+            print("Puzzle is unsolvable.")
+            return solutions
+
         for word in self.possible_words:
             heappush(pq, PrioritizedSolutionCandidate(SolutionCandidate([word])))
 
@@ -120,6 +188,14 @@ class LetterBoxer:
         while pq:
             curr = heappop(pq)
             candidates_considered += 1
+
+            gamestate, size = curr.candidate.gamestate_class()
+            if (
+                gamestate in seen_states and seen_states[gamestate] <= size
+            ):  # we'be been here or a more promising state
+                continue
+
+            seen_states[gamestate] = size
 
             # Update the progress bar based on the ratio of candidates considered to total candidates
             progress = candidates_considered / (candidates_considered + len(pq))
@@ -153,21 +229,29 @@ class LetterBoxer:
                 self.word_map[last_char] if last_char in self.word_map else []
             )
             for next_word in possible_next_words:
-                if (
-                    next_word != curr.candidate.word_list[-1]
-                ):  # no point in repeating the same word
-                    new_candidate = SolutionCandidate(
-                        curr.candidate.word_list + [next_word]
-                    )
-                    heappush(pq, PrioritizedSolutionCandidate(new_candidate))
+                heappush(
+                    pq,
+                    PrioritizedSolutionCandidate(curr.candidate.add_word(next_word)),
+                )
 
         return solutions
+
+
+def generate_random_letter_set() -> Tuple[str, str, str, str]:
+    """
+    Generate a random set of letters for the puzzle.
+    """
+    import random
+
+    charset = string.ascii_lowercase
+    chars = random.sample(charset, k=12)
+    return tuple("".join(chars[i : i + 3]) for i in range(0, 12, 3))
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Find optimal solutions to the Letter Boxer puzzle.",
-        usage="%(prog)s --dictionary <path> ryd ivf wpn oge",
+        usage="%(prog)s --dictionary <path> [--random | s0 s1 s2 s3]",
     )
     parser.add_argument(
         "--dictionary",
@@ -175,10 +259,15 @@ def main():
         default="/usr/share/dict/words",
         help="Path to the dictionary file.",
     )
-    parser.add_argument("s0", type=str, help="First set of letters.")
-    parser.add_argument("s1", type=str, help="Second set of letters.")
-    parser.add_argument("s2", type=str, help="Third set of letters.")
-    parser.add_argument("s3", type=str, help="Fourth set of letters.")
+    parser.add_argument(
+        "--random",
+        action="store_true",
+        help="Generate a random set of letters for the puzzle.",
+    )
+    parser.add_argument("--s0", type=str, default="", help="First set of letters.")
+    parser.add_argument("--s1", type=str, default="", help="Second set of letters.")
+    parser.add_argument("--s2", type=str, default="", help="Third set of letters.")
+    parser.add_argument("--s3", type=str, default="", help="Fourth set of letters.")
 
     args = parser.parse_args()
 
@@ -186,8 +275,13 @@ def main():
     trie = build_trie_from_file(args.dictionary)
     print("Solving...")
     letter_sets = (args.s0, args.s1, args.s2, args.s3)
+
+    if args.random or not all(letter_sets):
+        letter_sets = generate_random_letter_set()
+    print(f"Letter sets: {letter_sets}")
     solver = LetterBoxer(letter_sets, trie)
     ans = solver.solve()
+
     if not ans:
         print("No solutions found.")
         return
