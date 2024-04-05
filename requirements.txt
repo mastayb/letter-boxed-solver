@@ -1,0 +1,9 @@
+black==24.3.0
+click==8.1.7
+datrie==0.8.2
+mypy-extensions==1.0.0
+packaging==24.0
+pathspec==0.12.1
+platformdirs==4.2.0
+pyenchant==3.2.2
+tqdm==4.66.2
