@@ -1,5 +1,4 @@
 import argparse
-import pickle
 import string
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
@@ -25,22 +24,6 @@ def build_trie_from_file(filename: Path):
                 trie[word] = True
 
     return trie
-
-
-def save_trie(trie, filename):
-    """
-    Save the trie to a file using pickle.
-    """
-    with open(filename, "wb") as f:
-        pickle.dump(trie, f)
-
-
-def load_trie(filename):
-    """
-    Load a trie from a file.
-    """
-    with open(filename, "rb") as f:
-        return pickle.load(f)
 
 
 @dataclass
