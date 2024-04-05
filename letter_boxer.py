@@ -205,7 +205,11 @@ def main():
     letter_sets = (args.s0, args.s1, args.s2, args.s3)
     solver = LetterBoxer(letter_sets, trie)
     ans = solver.solve()
-    print(f"Found {len(ans)} solutions with {len(solver.possible_words)} words.")
+    if not ans:
+        print("No solutions found.")
+        return
+
+    print(f"Found {len(ans)} solutions of length {len(ans[0])}.")
     for sol in ans:
         print(sol)
 
