@@ -1,4 +1,5 @@
 import argparse
+from collections import defaultdict
 import string
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
@@ -29,53 +30,31 @@ def build_trie_from_file(filename: Path):
 class SolutionCandidate:
     char_set: ClassVar[FrozenSet[str]] = frozenset()
     word_list: List[str]
-    residue_size_history: List[int]
     residue: FrozenSet[str]
 
     def __init__(
         self,
         word_list: Optional[List[str]] = None,
-        residue_size_history: Optional[List[int]] = None,
         residue: Optional[FrozenSet[str]] = None,
     ) -> None:
         self.word_list = word_list if word_list is not None else []
-
-        if residue_size_history is not None and residue is not None:
-            self.residue_size_history = residue_size_history
-            self.residue = residue
-        else:
-            self.residue_size_history = []
-            residue = set(self.char_set)
-            for word in self.word_list:
-                residue = residue - {c for c in word}
-                self.residue_size_history.append(len(residue))
-            self.residue = frozenset(residue)
-
-    def add_word(self, word: str) -> "SolutionCandidate":
-        next_residue = self.residue - set(word)
-        return SolutionCandidate(
-            self.word_list + [word],
-            self.residue_size_history + [len(next_residue)],
-            next_residue,
+        self.residue = (
+            residue
+            if residue is not None
+            else frozenset(self.char_set - set("".join(self.word_list)))
         )
 
-    def viable_next_word(self, word: str) -> bool:
-        next_residue = self.residue - set(word)
+    def add_word(self, word: str) -> "SolutionCandidate":
+        return SolutionCandidate(
+            self.word_list + [word],
+            self.residue - set(word),
+        )
 
-        # check if the residue is decreasing
-        if len(next_residue) < len(self.residue):
-            return True
+    def taxonomy(self) -> Tuple[FrozenSet[str], str]:
+        return self.residue, self.word_list[-1][-1]
 
-        # otherwise see if we've been at an equivalent state (same residue size with same ending char)
-        for res_size, prior_word in zip(self.residue_size_history, self.word_list):
-            if res_size == len(next_residue) and prior_word[-1] == word[-1]:
-                return False
-
-        # It may be possible to make progress from here
-        return True
-
-    def gamestate_class(self) -> Tuple[Tuple[FrozenSet[str], str], int]:
-        return (self.residue, self.word_list[-1][-1]), len(self.word_list)
+    def score(self) -> int:
+        return len(self.word_list)
 
 
 @dataclass(order=True)
@@ -137,33 +116,16 @@ class LetterBoxer:
                 self.word_map[word[0]] = set()
             self.word_map[word[0]].add(word)
 
-    def check_solvable(self) -> bool:
-        """
-        Check if the puzzle is solvable.
-        """
-        if set(self.charset) - {c for word in self.possible_words for c in word}:
-            return False
+    def _get_congruent_scores(self, last_char, res):
+        for other_res in self.state_map[last_char]:
+            if res.issuperset(other_res):
+                yield self.state_map[last_char][other_res]
 
-        # find connected components; if there is a connected component that contains all the characters, the puzzle is solvable
-        char_graph = {}
-        for char in self.charset:
-            char_graph[char] = set()
-            if char not in self.word_map:
-                continue
-            for word in self.word_map[char]:
-                char_graph[char] = char_graph[char].union(set(word))
-
-        for start in char_graph:
-            visited = set()
-            stack = [start]
-            while stack:
-                curr = stack.pop()
-                visited.add(curr)
-                stack.extend(char_graph[curr] - visited)
-            if visited == self.charset:
-                return True
-
-        return False
+    def _is_redundant_state(self, last_char, res, score):
+        return any(
+            other_score < score
+            for other_score in self._get_congruent_scores(last_char, res)
+        )
 
     def solve(self):
         """
@@ -174,11 +136,7 @@ class LetterBoxer:
         pq = []
         candidates_considered = 0
 
-        seen_states = {}
-
-        if not self.check_solvable():
-            print("Puzzle is unsolvable.")
-            return solutions
+        self.state_map = defaultdict(lambda: defaultdict(int))
 
         for word in self.possible_words:
             heappush(pq, PrioritizedSolutionCandidate(SolutionCandidate([word])))
@@ -189,13 +147,13 @@ class LetterBoxer:
             curr = heappop(pq)
             candidates_considered += 1
 
-            gamestate, size = curr.candidate.gamestate_class()
-            if (
-                gamestate in seen_states and seen_states[gamestate] <= size
-            ):  # we'be been here or a more promising state
+            res, last_char = curr.candidate.taxonomy()
+            score = curr.candidate.score()
+
+            if self._is_redundant_state(last_char, res, score):
                 continue
 
-            seen_states[gamestate] = size
+            self.state_map[last_char][res] = score
 
             # Update the progress bar based on the ratio of candidates considered to total candidates
             progress = candidates_considered / (candidates_considered + len(pq))
@@ -233,6 +191,8 @@ class LetterBoxer:
                     pq,
                     PrioritizedSolutionCandidate(curr.candidate.add_word(next_word)),
                 )
+
+        print(f"Processed {candidates_considered} candidates.")
 
         return solutions
 
@@ -273,12 +233,13 @@ def main():
 
     print("Building trie...")
     trie = build_trie_from_file(args.dictionary)
-    print("Solving...")
     letter_sets = (args.s0, args.s1, args.s2, args.s3)
 
     if args.random or not all(letter_sets):
         letter_sets = generate_random_letter_set()
+
     print(f"Letter sets: {letter_sets}")
+    print("Solving...")
     solver = LetterBoxer(letter_sets, trie)
     ans = solver.solve()
 
@@ -287,8 +248,13 @@ def main():
         return
 
     print(f"Found {len(ans)} solutions of length {len(ans[0])}.")
+
     for sol in ans:
         print(sol)
+
+    if len(ans) > 1:
+        print("Shortest solution:")
+        print(sorted(ans, key=lambda a: sum(map(len, a)))[0])
 
 
 if __name__ == "__main__":
