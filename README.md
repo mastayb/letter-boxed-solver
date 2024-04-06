@@ -33,7 +33,7 @@ To run the script, you need to provide four sets of letters and optionally a pat
 Here's an example of how to run the script:
 
 ```bash
-python letter_boxer.py ryd ivf wpn oge --dictionary ../dict/2of12.txt
+python letter_boxer.py --dictionary ./dict/words.txt ryd ivf wpn oge 
 ```
 
 In this example, `ryd`, `ivf`, `wpn`, and `oge` are the four sets of letters. The `--dictionary` option is used to specify a custom dictionary file.

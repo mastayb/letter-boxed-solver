@@ -1,4 +1,3 @@
-import argparse
 from collections import defaultdict
 import string
 from dataclasses import dataclass, field
@@ -9,6 +8,7 @@ from typing import ClassVar, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from datrie import Trie
 from tqdm import tqdm
+import click
 
 
 def build_trie_from_file(filename: Path):
@@ -74,6 +74,8 @@ class LetterBoxer:
     trie: Trie
     possible_words: Set[str]
     word_map: Dict[str, Set[str]]
+    g_score: Dict[str, Dict[FrozenSet[str], int]]
+    h_score: Dict[str, Dict[FrozenSet[str], int]]
 
     def __init__(self, sides: Tuple[str, str, str, str], trie: Trie) -> None:
         self.sides = sides
@@ -117,17 +119,39 @@ class LetterBoxer:
             self.word_map[word[0]].add(word)
 
     def _get_congruent_scores(self, last_char, res):
-        for other_res in self.state_map[last_char]:
+        for other_res in self.g_score[last_char]:
             if res.issuperset(other_res):
-                yield self.state_map[last_char][other_res]
+                yield self.g_score[last_char][other_res]
 
     def _is_redundant_state(self, last_char, res, score):
-        return any(
-            other_score < score
-            for other_score in self._get_congruent_scores(last_char, res)
-        )
+        if self.find_all:
+            return any(
+                other_score < score
+                for other_score in self._get_congruent_scores(last_char, res)
+            )
+        else:
+            return any(
+                other_score <= score
+                for other_score in self._get_congruent_scores(last_char, res)
+            )
 
-    def solve(self):
+    def _trim_redundant_states(self, last_char, res, score):
+        to_remove = set()
+        for other_res, other_score in self.g_score[last_char].items():
+            if res.issubset(other_res) and score < other_score:
+                to_remove.add(other_res)
+        for other_res in to_remove:
+            del self.g_score[last_char][other_res]
+
+    def _update_h_score(self, solution: SolutionCandidate):
+        res = self.charset
+        for i, word in enumerate(solution.word_list):
+            res = res - set(word)
+            self.h_score[word[-1]][res] = min(
+                self.h_score[word[-1]][res], len(solution.word_list) - i - 1
+            )
+
+    def solve(self, find_all: bool = False):
         """
         Solve the puzzle with branch and bound.
         """
@@ -135,8 +159,9 @@ class LetterBoxer:
         best = None
         pq = []
         candidates_considered = 0
+        self.find_all = find_all
 
-        self.state_map = defaultdict(lambda: defaultdict(int))
+        self.g_score = defaultdict(lambda: defaultdict(int))
 
         for word in self.possible_words:
             heappush(pq, PrioritizedSolutionCandidate(SolutionCandidate([word])))
@@ -151,9 +176,12 @@ class LetterBoxer:
             score = curr.candidate.score()
 
             if self._is_redundant_state(last_char, res, score):
+                # we've visited a state with the same ending letter and a subset of the remaining letters with a better score
+                #
                 continue
 
-            self.state_map[last_char][res] = score
+            self.g_score[last_char][res] = score
+            self._trim_redundant_states(last_char, res, score)
 
             # Update the progress bar based on the ratio of candidates considered to total candidates
             progress = candidates_considered / (candidates_considered + len(pq))
@@ -162,12 +190,22 @@ class LetterBoxer:
             if curr.candidate.residue == frozenset():
                 if best is None or len(curr.candidate.word_list) < len(best.word_list):
                     best = curr.candidate
-                    pq = list(
-                        filter(
-                            lambda x: len(x.candidate.word_list) <= len(best.word_list),
-                            pq,
+                    if find_all:
+                        pq = list(
+                            filter(
+                                lambda x: len(x.candidate.word_list)
+                                <= len(best.word_list),
+                                pq,
+                            )
                         )
-                    )
+                    if not find_all:
+                        pq = list(
+                            filter(
+                                lambda x: len(x.candidate.word_list)
+                                < len(best.word_list),
+                                pq,
+                            )
+                        )
                     solutions = []
                 if best is not None and len(curr.candidate.word_list) == len(
                     best.word_list
@@ -177,6 +215,13 @@ class LetterBoxer:
 
             if best is not None and len(curr.candidate.word_list) >= len(
                 best.word_list
+            ):
+                continue
+
+            if (
+                not find_all
+                and best is not None
+                and len(curr.candidate.word_list) >= len(best.word_list) - 1
             ):
                 continue
 
@@ -192,8 +237,6 @@ class LetterBoxer:
                     PrioritizedSolutionCandidate(curr.candidate.add_word(next_word)),
                 )
 
-        print(f"Processed {candidates_considered} candidates.")
-
         return solutions
 
 
@@ -208,46 +251,50 @@ def generate_random_letter_set() -> Tuple[str, str, str, str]:
     return tuple("".join(chars[i : i + 3]) for i in range(0, 12, 3))
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Find optimal solutions to the Letter Boxer puzzle.",
-        usage="%(prog)s --dictionary <path> [--random | s0 s1 s2 s3]",
-    )
-    parser.add_argument(
-        "--dictionary",
-        type=Path,
-        default="/usr/share/dict/words",
-        help="Path to the dictionary file.",
-    )
-    parser.add_argument(
-        "--random",
-        action="store_true",
-        help="Generate a random set of letters for the puzzle.",
-    )
-    parser.add_argument("--s0", type=str, default="", help="First set of letters.")
-    parser.add_argument("--s1", type=str, default="", help="Second set of letters.")
-    parser.add_argument("--s2", type=str, default="", help="Third set of letters.")
-    parser.add_argument("--s3", type=str, default="", help="Fourth set of letters.")
-
-    args = parser.parse_args()
+@click.command()
+@click.option(
+    "--random", is_flag=True, help="Generate a random set of letters for the puzzle."
+)
+@click.option(
+    "--dictionary",
+    type=click.Path(exists=True),
+    default="/usr/share/dict/words",
+    help="Path to the dictionary file.",
+)
+@click.option(
+    "--find-all",
+    "find_all",
+    is_flag=True,
+    help="Find all optimal solutions, rather than just one.",
+    default=False,
+)
+@click.argument("letters", nargs=-1)
+def main(random, dictionary, find_all, letters):
+    """
+    Find optimal solutions to the Letter Boxer puzzle.
+    """
+    if random:
+        letters = generate_random_letter_set()
+    elif not letters:
+        click.echo(
+            "Error: You must provide a set of letters or use the --random option.",
+            err=True,
+        )
+        return
 
     print("Building trie...")
-    trie = build_trie_from_file(args.dictionary)
-    letter_sets = (args.s0, args.s1, args.s2, args.s3)
-
-    if args.random or not all(letter_sets):
-        letter_sets = generate_random_letter_set()
-
-    print(f"Letter sets: {letter_sets}")
+    trie = build_trie_from_file(dictionary)
     print("Solving...")
-    solver = LetterBoxer(letter_sets, trie)
-    ans = solver.solve()
-
+    solver = LetterBoxer(letters, trie)
+    ans = solver.solve(find_all=find_all)
     if not ans:
         print("No solutions found.")
         return
 
-    print(f"Found {len(ans)} solutions of length {len(ans[0])}.")
+    if find_all:
+        print(f"Found {len(ans)} solutions of length {len(ans[0])}.")
+    elif len(ans) == 1:
+        print("Found a solution:")
 
     for sol in ans:
         print(sol)
@@ -255,6 +302,8 @@ def main():
     if len(ans) > 1:
         print("Shortest solution:")
         print(sorted(ans, key=lambda a: sum(map(len, a)))[0])
+        print("Longest solution:")
+        print(sorted(ans, key=lambda a: -sum(map(len, a)))[0])
 
 
 if __name__ == "__main__":
